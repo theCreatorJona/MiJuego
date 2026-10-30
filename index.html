@@ -200,7 +200,7 @@
 
       try {
         // 1. Lee directamente el archivo hj..json ubicado al mismo nivel de carpeta
-        const response = await fetch('./hj.json');
+        const response = await fetch("./hj.json");
         if (!response.ok) {
           throw new Error(`Error HTTP: ${response.status} al intentar leer hj..json`);
         }
