@@ -1,0 +1,521 @@
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Sistema de Movimiento y Control de Sprites por Ángulo</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: none; /* Previene gestos de scroll/zoom en móviles */
+    }
+
+    body, html {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #0b0e14;
+      font-family: system-ui, -apple-system, sans-serif;
+      color: #e2e8f0;
+    }
+
+    #canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+
+    /* Interfaz HUD de estado */
+    .hud {
+      position: absolute;
+      top: 16px;
+      left: 16px;
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(8px);
+      padding: 16px;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+      pointer-events: none;
+      min-width: 260px;
+    }
+
+    .hud h1 {
+      font-size: 1.1rem;
+      margin: 0 0 8px 0;
+      color: #38bdf8;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .hud-stat {
+      font-size: 0.85rem;
+      margin: 4px 0;
+      display: flex;
+      justify-content: space-between;
+      color: #94a3b8;
+    }
+
+    .hud-stat span {
+      color: #f1f5f9;
+      font-weight: 600;
+      font-family: monospace;
+    }
+
+    .controls-hint {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(15, 23, 42, 0.75);
+      padding: 8px 16px;
+      border-radius: 20px;
+      font-size: 0.85rem;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      pointer-events: none;
+      text-align: center;
+    }
+
+    /* Indicador visual de carga de archivos externos */
+    #status-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(11, 14, 20, 0.95);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 10;
+      padding: 20px;
+      text-align: center;
+    }
+
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 4px solid rgba(56, 189, 248, 0.2);
+      border-left-color: #38bdf8;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin-bottom: 16px;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+
+  <canvas id="canvas"></canvas>
+
+  <div class="hud">
+    <h1>Control Jugador</h1>
+    <div class="hud-stat">Ángulo: <span id="val-angle">0.0°</span></div>
+    <div class="hud-stat">Frame Sprite: <span id="val-frame">Cargando...</span></div>
+    <div class="hud-stat">Posición X: <span id="val-posx">0</span></div>
+    <div class="hud-stat">Posición Y: <span id="val-posy">0</span></div>
+    <div class="hud-stat">Estado: <span id="val-state">Inactivo</span></div>
+  </div>
+
+  <div class="controls-hint">
+    Mantén pulsado y arrastra el dedo en cualquier punto de la pantalla para mover la nave
+  </div>
+
+  <div id="status-overlay">
+    <div class="spinner" id="spinner"></div>
+    <h2 id="status-text">Leyendo hj..json y cargando hj.png...</h2>
+  </div>
+
+  <script>
+    // =========================================================================
+    // CONFIGURACIÓN Y ESTADO DE LA APLICACIÓN
+    // =========================================================================
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+
+    // Elementos de la interfaz HUD
+    const statusOverlay = document.getElementById('status-overlay');
+    const statusText = document.getElementById('status-text');
+    const valAngle = document.getElementById('val-angle');
+    const valFrame = document.getElementById('val-frame');
+    const valPosX = document.getElementById('val-posx');
+    const valPosY = document.getElementById('val-posy');
+    const valState = document.getElementById('val-state');
+
+    // Variables donde se guardará la información leída del JSON y la Imagen
+    let framesData = null;
+    const spriteSheetImage = new Image();
+    
+    // Arreglo procesado de frames ordenados para búsqueda rápida según ángulo
+    let angleFrameMap = []; 
+
+    // Estado del Jugador en el mundo
+    const player = {
+      x: 0,
+      y: 0,
+      speed: 350, // Píxeles por segundo
+      currentFrameKey: '',
+      currentAngle: 0
+    };
+
+    // Estado del Input (Toque táctil / Ratón)
+    const input = {
+      isPressed: false,
+      screenX: 0,
+      screenY: 0
+    };
+
+    // Cámara centrada continuamente en el jugador
+    const camera = {
+      x: 0,
+      y: 0
+    };
+
+    // Puntos estelar de fondo para visualizar el desplazamiento del mundo
+    const stars = [];
+    function initStars() {
+      stars.length = 0;
+      for (let i = 0; i < 300; i++) {
+        stars.push({
+          x: (Math.random() - 0.5) * 4000,
+          y: (Math.random() - 0.5) * 4000,
+          size: Math.random() * 2 + 0.5,
+          alpha: Math.random() * 0.8 + 0.2
+        });
+      }
+    }
+
+    // =========================================================================
+    // CARGA LECTURA DEL ARCHIVO hj..json Y hj.png
+    // =========================================================================
+    async function initGame() {
+      resizeCanvas();
+      initStars();
+
+      try {
+        // 1. Lee directamente el archivo hj..json ubicado al mismo nivel de carpeta
+        const response = await fetch('./hj..json');
+        if (!response.ok) {
+          throw new Error(`Error HTTP: ${response.status} al intentar leer hj..json`);
+        }
+        
+        framesData = await response.json();
+
+        // 2. Procesa la estructura del JSON cargado para mapear ángulos
+        processFramesData();
+
+        // 3. Carga la imagen del spritesheet
+        spriteSheetImage.src = './hj.png';
+
+        spriteSheetImage.onload = () => {
+          // Ocultar pantalla de carga e iniciar bucle de juego
+          statusOverlay.style.display = 'none';
+          setupEvents();
+          requestAnimationFrame(gameLoop);
+        };
+
+        spriteSheetImage.onerror = () => {
+          statusText.innerText = "Error: No se pudo cargar la imagen hj.png. Asegúrate de que está al mismo nivel del archivo.";
+          document.getElementById('spinner').style.display = 'none';
+        };
+
+      } catch (err) {
+        console.error("Error cargando los archivos del juego:", err);
+        statusText.innerHTML = `Error cargando los recursos locales:<br><small style="color: #f87171">${err.message}</small><br><br>
+        <span style="font-size:0.8rem; color:#94a3b8">Recuerda ejecutar el código a través de un servidor web local (ej: Live Server o <code>npx serve</code>) para permitir la lectura del JSON local.</span>`;
+        document.getElementById('spinner').style.display = 'none';
+      }
+    }
+
+    // Parsea los nombres de clave ("frm_XXX_angle_-YY.Y.png") obteniendo el ángulo numérico exacto
+    function processFramesData() {
+      angleFrameMap = [];
+      const frames = framesData.frames;
+
+      for (const key in frames) {
+        // Extrae el valor flotante del ángulo del nombre de la propiedad en el JSON
+        const match = key.match(/angle_(-?\d+\.?\d*)/);
+        if (match) {
+          let angleVal = parseFloat(match[1]);
+          
+          // Mapea y normaliza el ángulo al rango positivo estándar de 0° a 360°
+          let normalizedAngle = (angleVal % 360 + 360) % 360;
+
+          angleFrameMap.push({
+            key: key,
+            angle: normalizedAngle,
+            rect: frames[key]
+          });
+        }
+      }
+
+      // Ordenar por el ángulo de menor a mayor
+      angleFrameMap.sort((a, b) => a.angle - b.angle);
+
+      // Asigna por defecto el primer frame encontrado
+      if (angleFrameMap.length > 0) {
+        player.currentFrameKey = angleFrameMap[0].key;
+      }
+    }
+
+    // =========================================================================
+    // CÁLCULO DEL ÁNGULO Y BÚSQUEDA DEL SPRITE MÁS CERCANO
+    // =========================================================================
+    function getBestFrameForAngle(targetAngle) {
+      let normalized = (targetAngle % 360 + 360) % 360;
+
+      let closestFrame = angleFrameMap[0];
+      let minDiff = Infinity;
+
+      for (let i = 0; i < angleFrameMap.length; i++) {
+        const item = angleFrameMap[i];
+        let diff = Math.abs(item.angle - normalized);
+        
+        // Ajuste para la discontinuidad circular entre 360° y 0°
+        if (diff > 180) {
+          diff = 360 - diff;
+        }
+
+        if (diff < minDiff) {
+          minDiff = diff;
+          closestFrame = item;
+        }
+      }
+
+      return closestFrame;
+    }
+
+    // =========================================================================
+    // CONTROLES TÁCTILES / RATÓN (MANTENER PULSADO)
+    // =========================================================================
+    function setupEvents() {
+      window.addEventListener('resize', resizeCanvas);
+
+      // Eventos de Ratón
+      window.addEventListener('mousedown', (e) => {
+        input.isPressed = true;
+        updateInputPosition(e.clientX, e.clientY);
+      });
+
+      window.addEventListener('mousemove', (e) => {
+        if (input.isPressed) {
+          updateInputPosition(e.clientX, e.clientY);
+        }
+      });
+
+      window.addEventListener('mouseup', () => {
+        input.isPressed = false;
+      });
+
+      // Eventos Táctiles (Móvil/Tablet)
+      window.addEventListener('touchstart', (e) => {
+        if (e.touches.length > 0) {
+          input.isPressed = true;
+          updateInputPosition(e.touches[0].clientX, e.touches[0].clientY);
+        }
+      }, { passive: false });
+
+      window.addEventListener('touchmove', (e) => {
+        if (input.isPressed && e.touches.length > 0) {
+          updateInputPosition(e.touches[0].clientX, e.touches[0].clientY);
+        }
+      }, { passive: false });
+
+      window.addEventListener('touchend', (e) => {
+        if (e.touches.length === 0) {
+          input.isPressed = false;
+        }
+      });
+
+      window.addEventListener('touchcancel', () => {
+        input.isPressed = false;
+      });
+    }
+
+    function updateInputPosition(clientX, clientY) {
+      input.screenX = clientX;
+      input.screenY = clientY;
+    }
+
+    function resizeCanvas() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+
+    // =========================================================================
+    // BUCLE DE ACTUALIZACIÓN Y RENDERIZADO
+    // =========================================================================
+    let lastTime = performance.now();
+
+    function gameLoop(currentTime) {
+      const dt = Math.min((currentTime - lastTime) / 1000, 0.1);
+      lastTime = currentTime;
+
+      update(dt);
+      render();
+
+      requestAnimationFrame(gameLoop);
+    }
+
+    function update(dt) {
+      // 1. La cámara siempre persigue la posición exacta del jugador
+      camera.x = player.x;
+      camera.y = player.y;
+
+      if (input.isPressed) {
+        // El jugador siempre está visualmente en el centro de la pantalla
+        const centerX = canvas.width / 2;
+        const centerY = canvas.height / 2;
+
+        // Calcular el vector dirección desde el centro hasta donde se pulsa
+        const dx = input.screenX - centerX;
+        const dy = input.screenY - centerY;
+
+        const distance = Math.hypot(dx, dy);
+
+        // Umbral zona muerta para evitar imprecisiones si pulsa justo sobre el centro
+        if (distance > 10) {
+          // Normalización del movimiento (Vector unitario)
+          const dirX = dx / distance;
+          const dirY = dy / distance;
+
+          // Mover al jugador
+          player.x += dirX * player.speed * dt;
+          player.y += dirY * player.speed * dt;
+
+          // Cálculo del ángulo en grados mediante Math.atan2
+          const rad = Math.atan2(dy, dx);
+          const deg = rad * (180 / Math.PI);
+          const degrees360 = (deg % 360 + 360) % 360;
+
+          player.currentAngle = degrees360;
+
+          // Selección del Sprite correspondiente en el mapa parseado del JSON
+          const bestFrame = getBestFrameForAngle(degrees360);
+          if (bestFrame) {
+            player.currentFrameKey = bestFrame.key;
+          }
+
+          valState.innerText = 'En movimiento';
+          valState.style.color = '#4ade80';
+        }
+      } else {
+        valState.innerText = 'Detenido';
+        valState.style.color = '#94a3b8';
+      }
+
+      // Actualizar visualización HUD
+      valAngle.innerText = player.currentAngle.toFixed(1) + '°';
+      valFrame.innerText = player.currentFrameKey;
+      valPosX.innerText = Math.round(player.x);
+      valPosY.innerText = Math.round(player.y);
+    }
+
+    function render() {
+      // Limpiar pantalla
+      ctx.fillStyle = '#0b0e14';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.save();
+      
+      // Trasladar la vista del lienzo según la cámara (Jugador centrado)
+      const offsetX = canvas.width / 2 - camera.x;
+      const offsetY = canvas.height / 2 - camera.y;
+      ctx.translate(offsetX, offsetY);
+
+      // Dibujar elementos de fondo en el espacio de coordenadas del mundo
+      drawGrid();
+      drawStars();
+
+      // Dibujar línea guía cuando el usuario está manteniendo pulsado
+      if (input.isPressed) {
+        const worldTouchX = input.screenX - offsetX;
+        const worldTouchY = input.screenY - offsetY;
+
+        ctx.beginPath();
+        ctx.moveTo(player.x, player.y);
+        ctx.lineTo(worldTouchX, worldTouchY);
+        ctx.strokeStyle = 'rgba(56, 189, 248, 0.4)';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 6]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        ctx.beginPath();
+        ctx.arc(worldTouchX, worldTouchY, 12, 0, Math.PI * 2);
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      // DIBUJAR SPRITE DEL JUGADOR
+      drawPlayer();
+
+      ctx.restore();
+    }
+
+    function drawGrid() {
+      const gridSize = 128;
+      const startX = Math.floor((camera.x - canvas.width) / gridSize) * gridSize;
+      const endX = Math.ceil((camera.x + canvas.width) / gridSize) * gridSize;
+      const startY = Math.floor((camera.y - canvas.height) / gridSize) * gridSize;
+      const endY = Math.ceil((camera.y + canvas.height) / gridSize) * gridSize;
+
+      ctx.beginPath();
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.03)';
+      ctx.lineWidth = 1;
+
+      for (let x = startX; x <= endX; x += gridSize) {
+        ctx.moveTo(x, startY);
+        ctx.lineTo(x, endY);
+      }
+      for (let y = startY; y <= endY; y += gridSize) {
+        ctx.moveTo(startX, y);
+        ctx.lineTo(endX, y);
+      }
+      ctx.stroke();
+    }
+
+    function drawStars() {
+      ctx.fillStyle = '#ffffff';
+      for (let i = 0; i < stars.length; i++) {
+        const star = stars[i];
+        ctx.globalAlpha = star.alpha;
+        ctx.fillRect(star.x, star.y, star.size, star.size);
+      }
+      ctx.globalAlpha = 1.0;
+    }
+
+    function drawPlayer() {
+      if (!framesData || !framesData.frames[player.currentFrameKey]) return;
+
+      const frameData = framesData.frames[player.currentFrameKey];
+
+      // Coordenadas x, y, w, h obtenidas directamente del JSON leído
+      const sx = frameData.x;
+      const sy = frameData.y;
+      const sw = frameData.w;
+      const sh = frameData.h;
+
+      // Centrar el sprite sobre la posición x, y del jugador
+      const destX = player.x - sw / 2;
+      const destY = player.y - sh / 2;
+
+      ctx.drawImage(
+        spriteSheetImage,
+        sx, sy, sw, sh,     // Recorte del Spritesheet
+        destX, destY, sw, sh // Posición dibujada en el mapa
+      );
+    }
+
+    // Inicializar lectura de recursos
+    window.addEventListener('DOMContentLoaded', initGame);
+  </script>
+</body>
+</html>
